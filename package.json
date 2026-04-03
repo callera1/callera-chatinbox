@@ -1,0 +1,12 @@
+{
+  "name": "conversation-viewer",
+  "version": "1.0.0",
+  "description": "WhatsApp conversation viewer - reads from Supabase",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
