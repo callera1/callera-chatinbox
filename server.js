@@ -153,11 +153,20 @@ const html = `<!DOCTYPE html>
               displayContent = parseUserContent(msg.content);
             }
             
+            // Get or set timestamp in localStorage (persists across refreshes)
+            const storageKey = 'msg_ts_' + row.id;
+            let timestamp = localStorage.getItem(storageKey);
+            if (!timestamp) {
+              timestamp = new Date().toISOString();
+              localStorage.setItem(storageKey, timestamp);
+            }
+            
             acc[phone].messages.push({
               id: row.id,
               type: msg.type || 'unknown',
               content: displayContent,
               buttons: buttons,
+              timestamp: timestamp,
             });
             acc[phone].lastMessageId = row.id;
             
@@ -342,8 +351,9 @@ const html = `<!DOCTYPE html>
                       <div key={msg.id || i} className={'flex ' + (isAi ? 'justify-start' : 'justify-end')}>
                         <div className="max-w-[85%] md:max-w-[70%]">
                           <div className={'rounded-2xl px-4 py-2.5 shadow-md ' + (isAi ? 'bg-gray-700 text-white rounded-bl-sm' : 'bg-blue-600 text-white rounded-br-sm')}>
-                            <div className={'text-xs mb-1 ' + (isAi ? 'text-gray-400' : 'text-blue-200')}>
-                              {isAi ? '🤖 AI' : '👤 User'}
+                            <div className={'text-xs mb-1 flex justify-between ' + (isAi ? 'text-gray-400' : 'text-blue-200')}>
+                              <span>{isAi ? '🤖 AI' : '👤 User'}</span>
+                              <span>{msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString('hu-HU', {hour: '2-digit', minute: '2-digit'}) : ''}</span>
                             </div>
                             <p className="text-sm whitespace-pre-wrap break-words">{msg.content}</p>
                           </div>
