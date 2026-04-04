@@ -5,6 +5,61 @@ const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
 const APP_TITLE = process.env.APP_TITLE || 'Callera Conversations';
 
+// ============================================
+// SERVER-SIDE TIMESTAMP STORAGE
+// Stored in memory - persists while server runs
+// ============================================
+const messageTimestamps = {};  // { messageId: "2026-04-03T14:32:00Z" }
+let cachedConversations = null;
+let lastFetch = null;
+
+async function fetchFromSupabase() {
+  try {
+    const response = await fetch(
+      SUPABASE_URL + '/rest/v1/n8n_chat_histories?select=id,session_id,message&order=id.asc',
+      {
+        headers: {
+          'apikey': SUPABASE_KEY,
+          'Authorization': 'Bearer ' + SUPABASE_KEY,
+        },
+      }
+    );
+    
+    if (!response.ok) return null;
+    
+    const data = await response.json();
+    
+    // Assign timestamps to new messages
+    const now = new Date().toISOString();
+    for (const row of data) {
+      if (!messageTimestamps[row.id]) {
+        messageTimestamps[row.id] = now;
+      }
+    }
+    
+    // Add timestamps to data
+    const dataWithTimestamps = data.map(row => ({
+      ...row,
+      timestamp: messageTimestamps[row.id]
+    }));
+    
+    cachedConversations = dataWithTimestamps;
+    lastFetch = new Date();
+    
+    return dataWithTimestamps;
+  } catch (e) {
+    console.error('Fetch error:', e);
+    return null;
+  }
+}
+
+// Initial fetch and periodic refresh (every 30 seconds)
+fetchFromSupabase();
+setInterval(fetchFromSupabase, 30000);
+
+// ============================================
+// HTML PAGE
+// ============================================
 const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -25,8 +80,6 @@ const html = `<!DOCTYPE html>
   <div id="root"></div>
   <script>
     window.CONFIG = {
-      SUPABASE_URL: "${SUPABASE_URL}",
-      SUPABASE_KEY: "${SUPABASE_KEY}",
       APP_TITLE: "${APP_TITLE}",
       AUTO_REFRESH_SECONDS: 30
     };
@@ -39,12 +92,9 @@ const html = `<!DOCTYPE html>
     const { useState, useEffect, useRef, useCallback } = React;
     const CONFIG = window.CONFIG;
 
-    // Parse AI message content - extract just the message field from JSON
     const parseAiContent = (content) => {
       if (!content) return { message: '[Empty]', buttons: [] };
-      
       try {
-        // Remove markdown code blocks if present
         let cleaned = content.trim();
         if (cleaned.startsWith('\`\`\`json')) {
           cleaned = cleaned.slice(7);
@@ -54,45 +104,31 @@ const html = `<!DOCTYPE html>
           if (cleaned.endsWith('\`\`\`')) cleaned = cleaned.slice(0, -3);
         }
         cleaned = cleaned.trim();
-        
         const parsed = JSON.parse(cleaned);
-        
-        // Extract message
         const message = parsed.message || '[No message]';
-        
-        // Extract buttons from send_interactive
         let buttons = [];
         if (parsed.send_interactive && parsed.send_interactive.buttons) {
           buttons = parsed.send_interactive.buttons.map(b => b.title || b.id);
         }
-        
         return { message, buttons };
       } catch (e) {
-        // If not JSON, return as-is
         return { message: content, buttons: [] };
       }
     };
 
-    // Clean user message - remove [TEXT] and [GOMB] prefixes
     const parseUserContent = (content) => {
       if (!content) return '';
-      
-      // Remove [TEXT] prefix
       if (content.startsWith('[TEXT]')) {
         return content.replace(/^\\[TEXT\\]\\s*/i, '');
       }
-      
-      // Handle [GOMB] - show as button click
       if (content.startsWith('[GOMB]')) {
         let cleaned = content.replace(/^\\[GOMB\\]\\s*/i, '');
-        // Format: "challenge_losing: Pierd clienți" -> "🔘 Pierd clienți"
         const colonIdx = cleaned.indexOf(':');
         if (colonIdx > -1) {
           cleaned = cleaned.slice(colonIdx + 1).trim();
         }
         return '🔘 ' + cleaned;
       }
-      
       return content;
     };
 
@@ -110,30 +146,13 @@ const html = `<!DOCTYPE html>
       const prevMessageCountRef = useRef({});
 
       const fetchMessages = useCallback(async () => {
-        if (!CONFIG.SUPABASE_URL || !CONFIG.SUPABASE_KEY) {
-          setError('Supabase credentials not configured');
-          setLoading(false);
-          return;
-        }
-        
         try {
-          const response = await fetch(
-            CONFIG.SUPABASE_URL + '/rest/v1/n8n_chat_histories?select=id,session_id,message&order=id.asc',
-            {
-              headers: {
-                'apikey': CONFIG.SUPABASE_KEY,
-                'Authorization': 'Bearer ' + CONFIG.SUPABASE_KEY,
-              },
-            }
-          );
-          
-          if (!response.ok) {
-            throw new Error('Failed to fetch: ' + response.status);
-          }
+          // Fetch from our own server API (not Supabase directly)
+          const response = await fetch('/api/messages');
+          if (!response.ok) throw new Error('Failed to fetch');
           
           const data = await response.json();
           
-          // Group by session_id (phone) - TRIM to avoid duplicates
           const grouped = data.reduce((acc, row) => {
             const phone = (row.session_id || 'Unknown').toString().trim();
             if (!acc[phone]) {
@@ -143,7 +162,6 @@ const html = `<!DOCTYPE html>
             const msg = row.message || {};
             const isAi = msg.type === 'ai';
             
-            // Parse content based on type
             let displayContent, buttons = [];
             if (isAi) {
               const parsed = parseAiContent(msg.content);
@@ -153,27 +171,18 @@ const html = `<!DOCTYPE html>
               displayContent = parseUserContent(msg.content);
             }
             
-            // Get or set timestamp in localStorage (persists across refreshes)
-            const storageKey = 'msg_ts_' + row.id;
-            let timestamp = localStorage.getItem(storageKey);
-            if (!timestamp) {
-              timestamp = new Date().toISOString();
-              localStorage.setItem(storageKey, timestamp);
-            }
-            
             acc[phone].messages.push({
               id: row.id,
               type: msg.type || 'unknown',
               content: displayContent,
               buttons: buttons,
-              timestamp: timestamp,
+              timestamp: row.timestamp,
             });
             acc[phone].lastMessageId = row.id;
             
             return acc;
           }, {});
           
-          // Sort phones by last message id (most recent first)
           const sortedPhones = Object.keys(grouped).sort((a, b) => 
             grouped[b].lastMessageId - grouped[a].lastMessageId
           );
@@ -181,7 +190,6 @@ const html = `<!DOCTYPE html>
           const sorted = {};
           sortedPhones.forEach(p => sorted[p] = grouped[p]);
           
-          // Check for new messages
           const currentSelectedCount = selectedPhone && sorted[selectedPhone] 
             ? sorted[selectedPhone].messages.length 
             : 0;
@@ -286,7 +294,6 @@ const html = `<!DOCTYPE html>
 
       return (
         <div className="h-screen bg-gray-900 flex overflow-hidden">
-          {/* Sidebar */}
           <div className={(mobileShowChat ? 'hidden md:flex' : 'flex') + ' w-full md:w-80 bg-gray-800 border-r border-gray-700 flex-col'}>
             <div className="p-4 border-b border-gray-700">
               <div className="flex items-center justify-between mb-3">
@@ -329,7 +336,6 @@ const html = `<!DOCTYPE html>
             </div>
           </div>
           
-          {/* Chat */}
           <div className={(mobileShowChat ? 'flex' : 'hidden md:flex') + ' flex-1 flex-col'}>
             {selectedPhone ? (
               <>
@@ -353,7 +359,7 @@ const html = `<!DOCTYPE html>
                           <div className={'rounded-2xl px-4 py-2.5 shadow-md ' + (isAi ? 'bg-gray-700 text-white rounded-bl-sm' : 'bg-blue-600 text-white rounded-br-sm')}>
                             <div className={'text-xs mb-1 flex justify-between ' + (isAi ? 'text-gray-400' : 'text-blue-200')}>
                               <span>{isAi ? '🤖 AI' : '👤 User'}</span>
-                              <span>{msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString('hu-HU', {hour: '2-digit', minute: '2-digit'}) : ''}</span>
+                              <span className="ml-3">{msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString('hu-HU', {hour: '2-digit', minute: '2-digit'}) : ''}</span>
                             </div>
                             <p className="text-sm whitespace-pre-wrap break-words">{msg.content}</p>
                           </div>
@@ -393,16 +399,42 @@ const html = `<!DOCTYPE html>
 </body>
 </html>`;
 
-const server = http.createServer((req, res) => {
+// ============================================
+// HTTP SERVER
+// ============================================
+const server = http.createServer(async (req, res) => {
+  // Health check
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok' }));
+    res.end(JSON.stringify({ status: 'ok', messages: Object.keys(messageTimestamps).length }));
     return;
   }
-  res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache' });
+  
+  // API endpoint - returns messages with timestamps
+  if (req.url === '/api/messages') {
+    res.writeHead(200, { 
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-cache'
+    });
+    
+    if (cachedConversations) {
+      res.end(JSON.stringify(cachedConversations));
+    } else {
+      const data = await fetchFromSupabase();
+      res.end(JSON.stringify(data || []));
+    }
+    return;
+  }
+  
+  // Main page
+  res.writeHead(200, { 
+    'Content-Type': 'text/html',
+    'Cache-Control': 'no-cache'
+  });
   res.end(html);
 });
 
 server.listen(PORT, () => {
-  console.log('Callera Viewer on port ' + PORT);
+  console.log('Callera Inbox running on port ' + PORT);
+  console.log('Supabase: ' + (SUPABASE_URL ? 'configured' : 'NOT SET'));
 });
