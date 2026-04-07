@@ -41,26 +41,52 @@ const html = `<!DOCTYPE html>
 
     const parseAiContent = (content) => {
       if (!content) return { message: '[Empty]', buttons: [] };
-      try {
-        let cleaned = content.trim();
-        if (cleaned.startsWith('\`\`\`json')) {
-          cleaned = cleaned.slice(7);
-          if (cleaned.endsWith('\`\`\`')) cleaned = cleaned.slice(0, -3);
-        } else if (cleaned.startsWith('\`\`\`')) {
-          cleaned = cleaned.slice(3);
-          if (cleaned.endsWith('\`\`\`')) cleaned = cleaned.slice(0, -3);
+      let cleaned = content.trim();
+      
+      // Remove markdown code blocks if present
+      if (cleaned.indexOf('\`\`\`json') === 0) {
+        cleaned = cleaned.substring(7);
+        if (cleaned.lastIndexOf('\`\`\`') === cleaned.length - 3) {
+          cleaned = cleaned.substring(0, cleaned.length - 3);
         }
         cleaned = cleaned.trim();
-        const parsed = JSON.parse(cleaned);
-        const message = parsed.message || '[No message]';
-        let buttons = [];
-        if (parsed.send_interactive && parsed.send_interactive.buttons) {
-          buttons = parsed.send_interactive.buttons.map(b => b.title || b.id);
+      } else if (cleaned.indexOf('\`\`\`') === 0) {
+        cleaned = cleaned.substring(3);
+        if (cleaned.lastIndexOf('\`\`\`') === cleaned.length - 3) {
+          cleaned = cleaned.substring(0, cleaned.length - 3);
         }
-        return { message, buttons };
-      } catch (e) {
-        return { message: content, buttons: [] };
+        cleaned = cleaned.trim();
       }
+      
+      // Try to parse as JSON only if it looks like JSON
+      if (cleaned.indexOf('{') === 0) {
+        try {
+          const parsed = JSON.parse(cleaned);
+          
+          // Check for output.message structure (n8n AI Agent format)
+          if (parsed.output && parsed.output.message) {
+            let buttons = [];
+            if (parsed.output.send_interactive && parsed.output.send_interactive.buttons) {
+              buttons = parsed.output.send_interactive.buttons.map(b => b.title || b.id);
+            }
+            return { message: parsed.output.message, buttons: buttons };
+          }
+          
+          // Fallback: direct message field
+          if (parsed.message && parsed.message.length > 0) {
+            let buttons = [];
+            if (parsed.send_interactive && parsed.send_interactive.buttons) {
+              buttons = parsed.send_interactive.buttons.map(b => b.title || b.id);
+            }
+            return { message: parsed.message, buttons: buttons };
+          }
+        } catch (e) {
+          // Not valid JSON, treat as plain text
+        }
+      }
+      
+      // Return as plain text
+      return { message: content, buttons: [] };
     };
 
     const parseUserContent = (content) => {
